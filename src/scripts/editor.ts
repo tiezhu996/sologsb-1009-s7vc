@@ -81,7 +81,7 @@ function createSeedProject(): ChapterProject {
       headingLevel: 1,
       text: "第三章 水循环与城市",
       accessibleText: "第三章 水循环与城市",
-      changeReason: "",
+      changeReason: "章节标题表述清晰、层级正确，无需改写。",
       reviewStatus: "approved",
       comments: [],
     },
@@ -140,7 +140,7 @@ function createSeedProject(): ChapterProject {
       headingLevel: 3,
       text: "雨水花园怎样工作",
       accessibleText: "雨水花园怎样工作",
-      changeReason: "",
+      changeReason: "标题本身简短明确，保留原文。",
       reviewStatus: "approved",
       comments: [],
     },
@@ -333,6 +333,36 @@ function statusLabel(status: ReviewStatus) {
   return "待审核";
 }
 
+type BlockerKind = "reason" | "comments";
+
+function approvalBlockers(block: ContentBlock): BlockerKind[] {
+  const blockers: BlockerKind[] = [];
+  if (!block.changeReason.trim()) blockers.push("reason");
+  if (block.comments.some((comment) => !comment.resolved)) blockers.push("comments");
+  return blockers;
+}
+
+function blockerLabel(kind: BlockerKind, block?: ContentBlock) {
+  if (kind === "reason") return "缺少改写原因";
+  const openCount = block?.comments.filter((comment) => !comment.resolved).length ?? 0;
+  return openCount > 1 ? `有 ${openCount} 条未解决批注` : "有未解决批注";
+}
+
+function blockerSummary(block: ContentBlock) {
+  return approvalBlockers(block).map((kind) => blockerLabel(kind, block)).join("；");
+}
+
+/** 术语统一表达变更后，受影响需要退回待审核的块（仅限已通过块）。 */
+function blocksAffectedByTerm(blocks: ContentBlock[], term: GlossaryTerm, oldPreferred?: string): ContentBlock[] {
+  return blocks.filter((block) => {
+    if (block.reviewStatus !== "approved") return false;
+    const rewrite = block.type === "image" ? block.imageAlt ?? "" : block.accessibleText;
+    if (oldPreferred && oldPreferred !== term.preferred && rewrite.includes(oldPreferred)) return true;
+    const combined = `${block.text} ${rewrite}`;
+    return combined.includes(term.source) && (!rewrite || !rewrite.includes(term.preferred));
+  });
+}
+
 function severityLabel(severity: Severity) {
   if (severity === "error") return "必须修复";
   if (severity === "warning") return "建议优化";
@@ -340,19 +370,33 @@ function severityLabel(severity: Severity) {
 }
 
 function exportHtml(project: ChapterProject) {
+  const reviewAttr = (block: ContentBlock) => (block.reviewStatus === "approved" ? "" : ` data-review-status="${block.reviewStatus}"`);
   const body = project.blocks.map((block) => {
+    const approved = block.reviewStatus === "approved";
+    const tagPrefix = approved ? "" : '<span class="review-inline">【未通过审校】</span>';
+    const marked = (inner: string) =>
+      `<div class="review-mark" data-review-status="${block.reviewStatus}">未通过审校，以下为原文（状态：${statusLabel(block.reviewStatus)}）</div>${inner}`;
+    let inner: string;
     if (block.type === "heading") {
       const level = Math.min(6, Math.max(1, block.headingLevel ?? 2));
-      return `<h${level}>${escapeHtml(block.accessibleText || block.text)}</h${level}>`;
+      const headingText = approved ? block.accessibleText || block.text : block.text;
+      const aria = approved ? "" : ` aria-label="未通过审校标题：${escapeHtml(block.text)}"`;
+      inner = `<div class="review-slot"><h${level}${reviewAttr(block)}${aria}>${tagPrefix}${escapeHtml(headingText)}</h${level}></div>`;
+    } else if (block.type === "image") {
+      inner = `<figure${reviewAttr(block)}><img src="${escapeHtml(block.imageSrc ?? "")}" alt="${escapeHtml(block.imageAlt ?? "")}"><figcaption>${tagPrefix}${escapeHtml(block.text)}</figcaption></figure>`;
+    } else if (block.type === "link") {
+      const linkText = approved ? block.accessibleText || block.text : block.text;
+      inner = `<p${reviewAttr(block)}><a href="${escapeHtml(block.linkHref ?? "#")}">${tagPrefix}${escapeHtml(linkText)}</a></p>`;
+    } else {
+      const paragraphText = approved ? block.accessibleText || block.text : block.text;
+      inner = `<p${reviewAttr(block)}>${tagPrefix}${escapeHtml(paragraphText)}</p>`;
     }
-    if (block.type === "image") {
-      return `<figure><img src="${escapeHtml(block.imageSrc ?? "")}" alt="${escapeHtml(block.imageAlt || block.accessibleText)}"><figcaption>${escapeHtml(block.text)}</figcaption></figure>`;
-    }
-    if (block.type === "link") {
-      return `<p><a href="${escapeHtml(block.linkHref ?? "#")}">${escapeHtml(block.accessibleText || block.text)}</a></p>`;
-    }
-    return `<p>${escapeHtml(block.accessibleText || block.text)}</p>`;
+    return approved ? inner : marked(inner);
   }).join("\n      ");
+  const pendingCount = project.blocks.filter((block) => block.reviewStatus !== "approved").length;
+  const exportNotice = pendingCount
+    ? `  <div class="export-notice" role="note">本章还有 ${pendingCount} 个内容块未通过审校，这些位置保留教材原文并已标注，请勿作为最终无障碍稿发布。</div>\n`
+    : "";
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -367,11 +411,17 @@ function exportHtml(project: ChapterProject) {
     h1, h2, h3, h4, h5, h6 { line-height: 1.4; margin-top: 1.8em; }
     figure { margin: 2em 0; } img { max-width: 100%; height: auto; } figcaption { font-size: .86em; color: #46554f; }
     .skip { position: absolute; left: -9999px; } .skip:focus { position: static; display: inline-block; padding: .5em; background: #fff; }
+    .export-notice { border: 2px solid #b76b08; background: #fff4e0; color: #6f4205; border-radius: 10px; padding: 12px 16px; font-size: .9em; margin: 16px 0 24px; }
+    .review-mark { border-left: 5px solid #b76b08; background: #fff7ea; color: #8a5209; font-weight: 700; font-size: .82em; padding: 6px 12px; margin: 1.6em 0 0; border-radius: 0 6px 0 0; }
+    .review-mark + h1, .review-mark + h2, .review-mark + h3, .review-mark + h4, .review-mark + h5, .review-mark + h6, .review-mark + p, .review-mark + figure { margin-top: .2em; }
+    .review-mark + figure, .review-mark + p { border-left: 5px solid #e2a94f; padding-left: 12px; }
+    .review-slot { border-left: 5px solid #e2a94f; padding-left: 12px; margin-top: .2em; }
+    .review-inline { color: #b76b08; font-weight: 700; margin-right: .3em; }
   </style>
 </head>
 <body>
   <a class="skip" href="#main">跳到正文</a>
-  <main id="main" tabindex="-1">
+${exportNotice}  <main id="main" tabindex="-1">
       ${body}
   </main>
 </body>
@@ -391,7 +441,20 @@ function download(filename: string, content: string, type = "text/html;charset=u
 function loadProject(): ChapterProject {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as { schema: number; project: ChapterProject };
-    if (stored.schema === 1 && stored.project?.blocks?.length) return stored.project;
+    if (stored.schema === 1 && stored.project?.blocks?.length) {
+      const loaded = stored.project;
+      let migrated = false;
+      for (const block of loaded.blocks) {
+        if (block.reviewStatus === "approved" && approvalBlockers(block).length) {
+          block.reviewStatus = "pending";
+          migrated = true;
+        }
+      }
+      if (migrated) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ schema: 1, project: loaded }));
+      }
+      return loaded;
+    }
   } catch {
     // Fall back to the bundled sample.
   }
@@ -411,6 +474,14 @@ let showGlossary = false;
 let undoStack: ChapterProject[] = [];
 let redoStack: ChapterProject[] = [];
 let saveTimer = 0;
+
+interface ApproveAllReport {
+  approvedCount: number;
+  skipped: { blockId: string; summary: string }[];
+}
+
+let approveAllReport: ApproveAllReport | null = null;
+let approveGateHint = false;
 
 const activeBlock = () => project.blocks.find((block) => block.id === activeBlockId) ?? project.blocks[0];
 const issues = () => analyze(project);
@@ -501,10 +572,11 @@ function render() {
           <div class="block-list">
             ${project.blocks.map((block, index) => {
               const blockIssues = list.filter((issue) => issue.blockId === block.id);
+              const blockers = block.reviewStatus === "approved" ? [] : approvalBlockers(block);
               return `<button class="block-item ${block.id === active.id ? "active" : ""}" data-action="select-block" data-block-id="${block.id}">
                 <span class="block-order">${index + 1}</span>
-                <span class="block-copy"><b>${block.type === "heading" ? `H${block.headingLevel}` : blockRole(block)}</b><span>${escapeHtml(block.accessibleText || block.text || "（空）")}</span></span>
-                <i class="status-${block.reviewStatus}" title="${statusLabel(block.reviewStatus)}"></i>
+                <span class="block-copy"><b>${block.type === "heading" ? `H${block.headingLevel}` : blockRole(block)}</b><span>${escapeHtml(block.accessibleText || block.text || "（空）")}</span>${blockers.length ? `<small class="block-blockers">${blockers.map((kind) => `缺${kind === "reason" ? "原因" : "批注未解决"}`).join(" · ")}</small>` : ""}</span>
+                <i class="status-${block.reviewStatus}" title="${statusLabel(block.reviewStatus)}${blockers.length ? `（${blockerSummary(block)}）` : ""}"></i>
                 ${blockIssues.length ? `<em>${blockIssues.length}</em>` : ""}
               </button>`;
             }).join("")}
@@ -522,6 +594,8 @@ function render() {
               <sl-button size="small" variant="${active.reviewStatus === "needs-work" ? "danger" : "default"}" data-action="needs-work">需修改</sl-button>
             </div>
           </div>
+
+          ${renderApprovalGate(active)}
 
           ${activeIssues.length ? `<div class="active-issues">${activeIssues.map((issue) => `
             <div class="issue-card ${issue.severity}">
@@ -573,7 +647,8 @@ function render() {
           </section>
 
           <section class="issues-panel">
-            <div class="section-heading"><div><span class="eyebrow">All checks</span><h2>全章问题</h2></div><sl-button size="small" variant="default" outline data-action="approve-all">全部通过</sl-button></div>
+            <div class="section-heading"><div><span class="eyebrow">All checks</span><h2>全章问题</h2></div><sl-button size="small" variant="success" outline data-action="approve-all">一键通过</sl-button></div>
+            ${renderApproveAllReport()}
             <div class="issue-list">
               ${list.length ? list.map((issue) => `<button class="${issue.id === activeIssueId ? "active" : ""} ${issue.severity}" data-action="jump-issue" data-issue-id="${issue.id}" data-block-id="${issue.blockId}"><span>${severityLabel(issue.severity)}</span><b>${escapeHtml(issue.title)}</b><small>段 ${project.blocks.findIndex((block) => block.id === issue.blockId) + 1} · ${escapeHtml(issue.suggestion)}</small></button>`).join("") : `<div class="issue-clear">✓ 全章检查通过</div>`}
             </div>
@@ -601,6 +676,39 @@ function render() {
     </sl-dialog>`;
 
   wireLiveFields();
+}
+
+function renderApprovalGate(block: ContentBlock) {
+  const blockers = approvalBlockers(block);
+  const openComments = block.comments.filter((comment) => !comment.resolved).length;
+  const row = (ok: boolean, text: string) => `<li class="${ok ? "ok" : "missing"}">${ok ? "✓" : "✕"} ${escapeHtml(text)}</li>`;
+  if (block.reviewStatus === "approved" && !blockers.length) {
+    return `<div class="approval-gate passed"><b>通过依据已齐备</b><ul>${row(true, "已记录改写原因")}${row(true, "所有批注均已解决")}</ul></div>`;
+  }
+  return `<div class="approval-gate ${blockers.length ? "blocked" : "ready"}">
+    <b>${blockers.length ? "通过前还缺以下依据" : "已满足通过条件，可以审核通过"}</b>
+    <ul>
+      ${row(!blockers.includes("reason"), blockers.includes("reason") ? "缺少改写原因：请在下方写明为什么这样改写" : "已记录改写原因")}
+      ${row(!blockers.includes("comments"), blockers.includes("comments") ? `${openComments} 条批注尚未解决` : "所有批注均已解决")}
+    </ul>
+    ${approveGateHint && blockers.length ? `<p class="gate-hint">无法通过：${escapeHtml(blockerSummary(block))}</p>` : ""}
+  </div>`;
+}
+
+function renderApproveAllReport() {
+  if (!approveAllReport) return "";
+  const { approvedCount, skipped } = approveAllReport;
+  const parts = [`<div class="approve-report">`];
+  parts.push(`<div class="report-head"><b>一键通过结果</b><button data-action="dismiss-report" aria-label="关闭报告" title="关闭">×</button></div>`);
+  parts.push(`<p class="report-summary">本次通过 <strong>${approvedCount}</strong> 块，跳过 <strong>${skipped.length}</strong> 块。</p>`);
+  if (skipped.length) {
+    parts.push(`<ul>${skipped.map((item) => {
+      const index = project.blocks.findIndex((block) => block.id === item.blockId);
+      return `<li><button data-action="select-block" data-block-id="${item.blockId}">第 ${index + 1} 块 · ${escapeHtml(item.summary)}</button></li>`;
+    }).join("")}</ul>`);
+  }
+  parts.push(`</div>`);
+  return parts.join("");
 }
 
 function renderSourceEditor(block: ContentBlock) {
@@ -681,6 +789,7 @@ app.addEventListener("click", (event) => {
   if (action === "select-block") {
     activeBlockId = target.dataset.blockId ?? activeBlockId;
     activeIssueId = "";
+    approveGateHint = false;
     render();
   }
   if (action === "jump-issue") {
@@ -701,14 +810,26 @@ app.addEventListener("click", (event) => {
       current.reviewStatus = "pending";
     }, "生成易读版本");
   }
-  if (action === "approve") updateActiveBlock((block) => { block.reviewStatus = "approved"; }, "审核通过");
+  if (action === "approve") {
+    if (approvalBlockers(activeBlock()).length) {
+      approveGateHint = true;
+      render();
+    } else {
+      approveGateHint = false;
+      updateActiveBlock((block) => { block.reviewStatus = "approved"; }, "审核通过");
+    }
+  }
   if (action === "needs-work") updateActiveBlock((block) => { block.reviewStatus = "needs-work"; }, "标记需修改");
   if (action === "add-comment") {
     const input = app.querySelector<HTMLElement & { value: string }>("#new-comment");
     const body = input?.value.trim();
-    if (body) updateActiveBlock((block) => {
-      block.comments.unshift({ id: uid("comment"), author: "当前编辑", body, createdAt: new Date().toISOString(), resolved: false, replies: [] });
-    }, "添加批注");
+    if (body) {
+      const reopen = activeBlock().reviewStatus === "approved";
+      updateActiveBlock((block) => {
+        block.comments.unshift({ id: uid("comment"), author: "当前编辑", body, createdAt: new Date().toISOString(), resolved: false, replies: [] });
+        if (reopen) block.reviewStatus = "pending";
+      }, reopen ? "新增批注，退回待审核" : "添加批注");
+    }
   }
   if (action === "reply") {
     const commentId = target.dataset.commentId ?? "";
@@ -720,10 +841,14 @@ app.addEventListener("click", (event) => {
   }
   if (action === "resolve-comment") {
     const commentId = target.dataset.commentId ?? "";
+    const found = activeBlock().comments.find((item) => item.id === commentId);
+    const reopening = !!found && found.resolved;
+    const reopenBlock = reopening && activeBlock().reviewStatus === "approved";
     updateActiveBlock((block) => {
       const comment = block.comments.find((item) => item.id === commentId);
       if (comment) comment.resolved = !comment.resolved;
-    }, "更新批注状态");
+      if (reopenBlock) block.reviewStatus = "pending";
+    }, reopenBlock ? "重新打开批注，退回待审核" : "更新批注状态");
   }
   if (action === "preview-normal") { previewMode = "normal"; render(); }
   if (action === "preview-assisted") { previewMode = "assisted"; render(); }
@@ -733,7 +858,12 @@ app.addEventListener("click", (event) => {
     const source = app.querySelector<HTMLElement & { value: string }>("#new-term-source");
     const preferred = app.querySelector<HTMLElement & { value: string }>("#new-term-preferred");
     if (source?.value.trim() && preferred?.value.trim()) {
-      commit("添加术语", (draft) => { draft.glossary.push({ id: uid("term"), source: source.value.trim(), preferred: preferred.value.trim(), note: "编辑新增术语" }); });
+      const term: GlossaryTerm = { id: uid("term"), source: source.value.trim(), preferred: preferred.value.trim(), note: "编辑新增术语" };
+      const affectedCount = blocksAffectedByTerm(project.blocks, term).length;
+      commit(affectedCount ? `添加术语，${affectedCount} 个已通过块退回待审核` : "添加术语", (draft) => {
+        draft.glossary.push(term);
+        blocksAffectedByTerm(draft.blocks, term).forEach((block) => { block.reviewStatus = "pending"; });
+      });
     }
   }
   if (action === "remove-term") {
@@ -750,7 +880,25 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (action === "approve-all") {
-    commit("全部审核通过", (draft) => { draft.blocks.forEach((block) => { block.reviewStatus = "approved"; }); });
+    const skipped = project.blocks
+      .filter((block) => block.reviewStatus !== "approved" && approvalBlockers(block).length)
+      .map((block) => ({ blockId: block.id, summary: blockerSummary(block) }));
+    let approvedCount = 0;
+    commit(skipped.length ? `一键通过：跳过 ${skipped.length} 块` : "一键通过全部内容块", (draft) => {
+      draft.blocks.forEach((block) => {
+        if (block.reviewStatus !== "approved" && approvalBlockers(block).length === 0) {
+          block.reviewStatus = "approved";
+          approvedCount += 1;
+        }
+      });
+    });
+    approveAllReport = { approvedCount, skipped };
+    approveGateHint = false;
+    render();
+  }
+  if (action === "dismiss-report") {
+    approveAllReport = null;
+    render();
   }
   if (action === "export") {
     download(`${project.title}-无障碍版.html`, exportHtml(project));
@@ -773,8 +921,18 @@ app.addEventListener("sl-change", (event) => {
   }
   if (element.matches("[data-term-id]")) {
     const termId = element.dataset.termId;
-    const value = (element as HTMLElement & { value: string }).value;
-    commit("修改术语表", (draft) => { const term = draft.glossary.find((item) => item.id === termId); if (term) term.preferred = value; });
+    const value = (element as HTMLElement & { value: string }).value.trim();
+    const oldTerm = project.glossary.find((item) => item.id === termId);
+    if (!oldTerm || oldTerm.preferred === value) return;
+    const probe: GlossaryTerm = { ...oldTerm, preferred: value };
+    const affectedCount = blocksAffectedByTerm(project.blocks, probe, oldTerm.preferred).length;
+    commit(affectedCount ? `修改术语统一表达，${affectedCount} 个已通过块退回待审核` : "修改术语表", (draft) => {
+      const term = draft.glossary.find((item) => item.id === termId);
+      if (!term) return;
+      const previous = term.preferred;
+      term.preferred = value;
+      blocksAffectedByTerm(draft.blocks, term, previous).forEach((block) => { block.reviewStatus = "pending"; });
+    });
   }
 });
 
